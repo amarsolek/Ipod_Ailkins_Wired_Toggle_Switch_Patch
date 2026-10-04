@@ -10,6 +10,26 @@ Based on Rockbox commit `bef221afd70454d948b21e9e6bc2dfd43002b273`
 
 ---
 
+## Install
+
+A prebuilt, verified binary is attached to the
+[latest release](https://github.com/amarsolek/Ipod_Ailkins_Wired_Toggle_Switch_Patch/releases/latest)
+as `rockbox-ipod6g-remote-fix-v1.0.zip`. Unzip it to the root of the iPod so
+the `.rockbox` folder lands at the top level, replacing what is there. You
+still need the Rockbox bootloader installed (use Rockbox Utility for that),
+and Rockbox Utility is also the easiest way to add fonts, which are left out
+of the zip to keep it small.
+
+Verify before installing:
+
+    .rockbox/rockbox.ipod            1,150,140 bytes  md5 ee39390205fefad0ff18f73cab0fe482
+    .rockbox/rocks/apps/Adam's_Playlists.rock  24,560 bytes
+    .rockbox/rocks/apps/Clear_Cache.rock        2,696 bytes
+
+Plugins must match the firmware's `PLUGIN_API_VERSION` (285 here) exactly, or
+Rockbox reports "Incompatible version" and refuses to load them. Do not mix
+plugins from one build with firmware from another.
+
 ## What this fixes
 
 **1. One decoder for both remote styles.** Earlier attempts tried to
