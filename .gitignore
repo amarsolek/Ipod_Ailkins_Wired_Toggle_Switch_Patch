@@ -1,0 +1,30 @@
+# ---- local build output -------------------------------------------------
+*.o
+*.elf
+*.map
+*.d
+build/
+build-*/
+rockbox/
+
+# ---- build products ------------------------------------------------------
+# This repo is source + patches + docs only. Built firmware and .rock
+# plugins are not tracked; rebuild them with BUILDING.md, or attach a
+# release zip to a git tag rather than committing it.
+*.rock
+*.ovl
+*.zip
+*.ipod
+
+# ---- device backups ------------------------------------------------------
+_ipod_backup/
+_driver_backup/
+
+# ---- editor / OS cruft --------------------------------------------------
+Thumbs.db
+desktop.ini
+.DS_Store
+*~
+*.swp
+*.bak
+*.tmp

@@ -1,0 +1,10 @@
+# Sources are built with a Linux cross-toolchain; keep LF in the working
+# copy so patches and diffs stay clean across machines.
+* text=auto eol=lf
+
+# Binaries - never touch these
+*.rock binary
+*.zip  binary
+*.sys  binary
+*.cat  binary
+*.raw  binary

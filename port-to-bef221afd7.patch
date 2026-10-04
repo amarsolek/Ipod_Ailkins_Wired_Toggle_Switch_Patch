@@ -1,0 +1,1000 @@
+diff --git a/apps/keymaps/keymap-ipod.c b/apps/keymaps/keymap-ipod.c
+index 787d930..1a6b34c 100644
+--- a/apps/keymaps/keymap-ipod.c
++++ b/apps/keymaps/keymap-ipod.c
+@@ -323,6 +323,13 @@ static const struct button_mapping remote_button_context_standard[]  = {
+     { ACTION_STD_QUICKSCREEN,   BUTTON_RC_MENU|BUTTON_REPEAT,          BUTTON_RC_MENU },
+     { ACTION_STD_CONTEXT,       BUTTON_RC_SELECT|BUTTON_REPEAT,        BUTTON_RC_SELECT },
+ 
++
++#ifdef HAVE_VOLUME_IN_LIST
++    { ACTION_LIST_VOLUP,        BUTTON_RC_VOL_UP,                   BUTTON_NONE },
++    { ACTION_LIST_VOLUP,        BUTTON_RC_VOL_UP|BUTTON_REPEAT,     BUTTON_NONE },
++    { ACTION_LIST_VOLDOWN,      BUTTON_RC_VOL_DOWN,                 BUTTON_NONE },
++    { ACTION_LIST_VOLDOWN,      BUTTON_RC_VOL_DOWN|BUTTON_REPEAT,   BUTTON_NONE },
++#endif
+     LAST_ITEM_IN_LIST
+ }; /* remote_button_context_standard */
+ 
+@@ -355,6 +362,13 @@ static const struct button_mapping remote_button_context_tree[]  = {
+     { ACTION_TREE_STOP,         BUTTON_RC_PLAY|BUTTON_REPEAT, BUTTON_RC_PLAY },
+     { ACTION_TREE_HOTKEY,       BUTTON_RC_SELECT|BUTTON_PLAY,   BUTTON_NONE },
+ 
++
++#ifdef HAVE_VOLUME_IN_LIST
++    { ACTION_LIST_VOLUP,        BUTTON_RC_VOL_UP,                   BUTTON_NONE },
++    { ACTION_LIST_VOLUP,        BUTTON_RC_VOL_UP|BUTTON_REPEAT,     BUTTON_NONE },
++    { ACTION_LIST_VOLDOWN,      BUTTON_RC_VOL_DOWN,                 BUTTON_NONE },
++    { ACTION_LIST_VOLDOWN,      BUTTON_RC_VOL_DOWN|BUTTON_REPEAT,   BUTTON_NONE },
++#endif
+     LAST_ITEM_IN_LIST__NEXTLIST(CONTEXT_STD)
+ }; /* remote_button_context_tree */
+ 
+diff --git a/apps/menus/plugin_menu.c b/apps/menus/plugin_menu.c
+index 05fb208..5bea77a 100644
+--- a/apps/menus/plugin_menu.c
++++ b/apps/menus/plugin_menu.c
+@@ -7,6 +7,7 @@
+  *                     \/            \/     \/    \/            \/
+  *
+  * Copyright (C) 2010 Thomas Martitz
++ * Plugins category menu with in-device customize (show/hide + reorder).
+  *
+  * This program is free software; you can redistribute it and/or
+  * modify it under the terms of the GNU General Public License
+@@ -19,6 +20,7 @@
+  ****************************************************************************/
+ 
+ #include <stdbool.h>
++#include <stdio.h>
+ #include <string.h>
+ #include "config.h"
+ #include "lang.h"
+@@ -28,23 +30,99 @@
+ #include "rbpaths.h"
+ #include "root_menu.h"
+ #include "tree.h"
++#include "file.h"
++#include "misc.h"
++#include "gui/list.h"
++#include "icons.h"
+ 
+ enum {
+     GAMES,
+     APPS,
+     DEMOS,
++    NUM_CATS
+ };
+ 
+ static const struct {
+     const char *path;
+     int id;
++    const char *key;
+ } items[] = {
+-    { PLUGIN_GAMES_DIR, LANG_PLUGIN_GAMES },
+-    { PLUGIN_APPS_DIR,  LANG_PLUGIN_APPS  },
+-    { PLUGIN_DEMOS_DIR, LANG_PLUGIN_DEMOS },
++    { PLUGIN_GAMES_DIR, LANG_PLUGIN_GAMES, "games" },
++    { PLUGIN_APPS_DIR,  LANG_PLUGIN_APPS,  "apps"  },
++    { PLUGIN_DEMOS_DIR, LANG_PLUGIN_DEMOS, "demos" },
+ };
+ 
+-/* if handler is active we are waiting to reenter menu */
++#define PLUGIN_MENU_CFG ROCKBOX_DIR "/plugin_menu.cfg"
++#define CUSTOMIZE_SENTINEL 0x40000
++
++/* display order (indices into items[]) and per-category visibility */
++static int  cat_order[NUM_CATS] = { GAMES, APPS, DEMOS };
++static bool cat_shown[NUM_CATS] = { true, true, true };
++
++/* ---------------- config load / save ---------------- */
++
++static int key_to_idx(const char *key)
++{
++    for (int i = 0; i < NUM_CATS; i++)
++        if (!strcmp(items[i].key, key))
++            return i;
++    return -1;
++}
++
++static void load_plugin_menu_cfg(void)
++{
++    for (int i = 0; i < NUM_CATS; i++)
++    {
++        cat_order[i] = i;
++        cat_shown[i] = true;
++    }
++
++    int fd = open(PLUGIN_MENU_CFG, O_RDONLY);
++    if (fd < 0)
++        return;
++
++    char line[32];
++    int n = 0;
++    bool seen[NUM_CATS] = { false, false, false };
++    while (n < NUM_CATS && read_line(fd, line, sizeof(line)) > 0)
++    {
++        char *sp = strchr(line, ' ');   /* format: "<key> <0|1>" */
++        int shown = 1;
++        if (sp)
++        {
++            *sp = '\0';
++            shown = (sp[1] == '0') ? 0 : 1;
++        }
++        int idx = key_to_idx(line);
++        if (idx >= 0 && !seen[idx])
++        {
++            cat_order[n++] = idx;
++            cat_shown[idx] = shown ? true : false;
++            seen[idx] = true;
++        }
++    }
++    close(fd);
++
++    for (int i = 0; i < NUM_CATS && n < NUM_CATS; i++)
++        if (!seen[i])
++            cat_order[n++] = i;
++}
++
++static void save_plugin_menu_cfg(void)
++{
++    int fd = open(PLUGIN_MENU_CFG, O_WRONLY | O_CREAT | O_TRUNC, 0666);
++    if (fd < 0)
++        return;
++    for (int i = 0; i < NUM_CATS; i++)
++    {
++        int idx = cat_order[i];
++        fdprintf(fd, "%s %d\n", items[idx].key, cat_shown[idx] ? 1 : 0);
++    }
++    close(fd);
++}
++
++/* ---------------- browse a category ---------------- */
++
+ static void pm_handler(unsigned short id, void *data)
+ {
+     remove_event(id, data);
+@@ -104,7 +182,120 @@ MENUITEM_FUNCTION_W_PARAM(apps_item,  ITEM_FLAG, ID2P(LANG_PLUGIN_APPS),
+ MENUITEM_FUNCTION_W_PARAM(demos_item, ITEM_FLAG, ID2P(LANG_PLUGIN_DEMOS),
+                           plugins_menu, (void*)DEMOS, NULL, Icon_Folder);
+ 
++static int customize_ret(void)
++{
++    return CUSTOMIZE_SENTINEL;
++}
++MENUITEM_FUNCTION(customize_item, MENU_FUNC_CHECK_RETVAL,
++                  "Customize this menu", customize_ret, NULL,
++                  Icon_Menu_setting);
++
++static const struct menu_item_ex *cat_items[NUM_CATS] =
++    { &games_item, &apps_item, &demos_item };
++
++/* ---------------- customize screen ---------------- */
++
++static const char *cust_get_name(int sel, void *data,
++                                 char *buf, size_t buflen)
++{
++    (void)data;
++    int idx = cat_order[sel];
++    snprintf(buf, buflen, "%s: %s", str(items[idx].id),
++             cat_shown[idx] ? "shown" : "hidden");
++    return buf;
++}
++
++static int cust_action_cb(int action, struct gui_synclist *lists)
++{
++    if (action == ACTION_STD_OK)
++    {
++        int p = gui_synclist_get_sel_pos(lists);
++        if (p >= 0 && p < NUM_CATS)
++            cat_shown[cat_order[p]] = !cat_shown[cat_order[p]];
++        return ACTION_REDRAW;
++    }
++    else if (action == ACTION_STD_CONTEXT)   /* long press: move up */
++    {
++        int p = gui_synclist_get_sel_pos(lists);
++        if (p >= 0 && p < NUM_CATS)
++        {
++            int prev = (p == 0) ? NUM_CATS - 1 : p - 1;
++            int t = cat_order[p];
++            cat_order[p] = cat_order[prev];
++            cat_order[prev] = t;
++            gui_synclist_select_item(lists, prev);
++        }
++        return ACTION_REDRAW;
++    }
++    return action;
++}
++
++static void customize_screen(void)
++{
++    struct simplelist_info info;
++    simplelist_info_init(&info,
++                         "Plugins menu (SELECT show/hide, hold=move up)",
++                         NUM_CATS, NULL);
++    info.get_name = cust_get_name;
++    info.action_callback = cust_action_cb;
++    info.title_icon = Icon_Plugin;
++    simplelist_show_list(&info);
++    save_plugin_menu_cfg();
++}
++
++/* ---------------- dynamic category menu ---------------- */
++
++static const struct menu_callback_with_desc dyn_desc =
++    { menu_callback, ID2P(LANG_PLUGINS), Icon_Plugin };
++static const struct menu_item_ex *dyn_sub[NUM_CATS + 1];
++static struct menu_item_ex dyn_menu;
++
++static void build_dyn_menu(void)
++{
++    int n = 0;
++    for (int i = 0; i < NUM_CATS; i++)
++    {
++        int idx = cat_order[i];
++        if (cat_shown[idx])
++            dyn_sub[n++] = cat_items[idx];
++    }
++    dyn_sub[n++] = &customize_item;
++
++    dyn_menu.flags = MT_MENU | MENU_HAS_DESC | MENU_ITEM_COUNT(n);
++    dyn_menu.submenus = dyn_sub;
++    dyn_menu.callback_and_desc = &dyn_desc;
++}
+ 
+-MAKE_MENU(plugin_menu, ID2P(LANG_PLUGINS), &menu_callback,
+-          Icon_Plugin,
+-          &games_item, &apps_item, &demos_item);
++/* Root-menu entry point (replaces the old static plugin_menu). */
++int plugins_screen(void *param)
++{
++    (void)param;
++    int ret;
++    static int selected = 0;
++
++    load_plugin_menu_cfg();
++
++    while (1)
++    {
++        build_dyn_menu();
++        ret = do_menu(&dyn_menu, &selected, NULL, false);
++
++        if (ret == CUSTOMIZE_SENTINEL)
++        {
++            customize_screen();
++            continue;
++        }
++        break;
++    }
++
++    switch (ret)
++    {
++        case GO_TO_PLUGIN:
++        case GO_TO_PLAYLIST_VIEWER:
++        case GO_TO_WPS:
++        case GO_TO_PREVIOUS_MUSIC:
++            return ret;
++        default:
++            return GO_TO_ROOT;
++    }
++}
+diff --git a/apps/plugins/CATEGORIES b/apps/plugins/CATEGORIES
+index bf646a5..3f6e504 100644
+--- a/apps/plugins/CATEGORIES
++++ b/apps/plugins/CATEGORIES
+@@ -209,3 +209,5 @@ xrick,games
+ xworld,games
+ zxbox,viewers
+ view_text,viewers
++playlist_art,apps
++clearcache,apps
+diff --git a/apps/plugins/SOURCES b/apps/plugins/SOURCES
+index 797601e..2dc9061 100644
+--- a/apps/plugins/SOURCES
++++ b/apps/plugins/SOURCES
+@@ -240,3 +240,8 @@ test_touchscreen.c
+ test_usb.c
+ test_viewports.c
+ #endif /* HAVE_TEST_PLUGINS */
++
++#if defined(HAVE_ALBUMART) && defined(HAVE_JPEG) && LCD_DEPTH > 4
++playlist_art.c
++#endif
++clearcache.c
+diff --git a/apps/root_menu.c b/apps/root_menu.c
+index 918669b..3d43ac8 100644
+--- a/apps/root_menu.c
++++ b/apps/root_menu.c
+@@ -467,10 +467,22 @@ extern struct menu_item_ex
+ #endif
+         main_menu_,
+         manage_settings,
+-        plugin_menu,
+         playlist_options,
+         info_menu,
+         system_menu;
++extern int plugins_screen(void *param);
++static int adams_playlists_launch(void *param)
++{
++    (void)param;
++    int ret;
++    push_activity_without_refresh(ACTIVITY_UNKNOWN);
++    ret = plugin_load(PLUGIN_APPS_DIR "/Adam's_Playlists.rock", NULL);
++    pop_current_activity_without_refresh();
++    if (ret == PLUGIN_GOTO_WPS)
++        return GO_TO_WPS;
++    return GO_TO_ROOT;
++}
++
+ static const struct root_items items[] = {
+     [GO_TO_FILEBROWSER] =   { browser, (void*)GO_TO_FILEBROWSER, &file_menu},
+ #ifdef HAVE_TAGCACHE
+@@ -489,12 +501,13 @@ static const struct root_items items[] = {
+ #endif
+ 
+     [GO_TO_RECENTBMARKS] =  { load_bmarks, NULL, &bookmark_settings_menu },
+-    [GO_TO_BROWSEPLUGINS] = { miscscrn, &plugin_menu, NULL },
++    [GO_TO_BROWSEPLUGINS] = { plugins_screen, NULL, NULL },
+     [GO_TO_PLAYLISTS_SCREEN] = { playlist_view_catalog, NULL,
+                                                         &playlist_options },
+     [GO_TO_PLAYLIST_VIEWER] = { playlist_view, NULL, &playlist_options },
+     [GO_TO_SYSTEM_SCREEN] = { miscscrn, &info_menu, &system_menu },
+     [GO_TO_SHORTCUTMENU] = { do_shortcut_menu, NULL, NULL },
++    [GO_TO_ADAMS_PLAYLISTS] = { adams_playlists_launch, NULL, NULL },
+ 
+ };
+ #define NUM_ITEMS (int)(sizeof(items)/sizeof(*items))
+@@ -512,6 +525,8 @@ MENUITEM_RETURNVALUE(file_browser, ID2P(LANG_DIR_BROWSER), GO_TO_FILEBROWSER,
+ MENUITEM_RETURNVALUE(db_browser, ID2P(LANG_TAGCACHE), GO_TO_DBBROWSER,
+                         NULL, Icon_Audio);
+ #endif
++MENUITEM_RETURNVALUE(adams_pl_item, "Adam's Playlists", GO_TO_ADAMS_PLAYLISTS,
++                     NULL, Icon_Plugin);
+ MENUITEM_RETURNVALUE(rocks_browser, ID2P(LANG_PLUGINS), GO_TO_BROWSEPLUGINS,
+                         NULL, Icon_Plugin);
+ 
+@@ -549,6 +564,7 @@ static struct menu_callback_with_desc root_menu_desc = {
+ 
+ static struct menu_table menu_table[] = {
+     /* Order here represents the default ordering */
++    { "adams", &adams_pl_item },
+     { "bookmarks", &bookmarks },
+     { "files", &file_browser },
+ #ifdef HAVE_TAGCACHE
+diff --git a/apps/root_menu.h b/apps/root_menu.h
+index 4c4a814..4f74693 100644
+--- a/apps/root_menu.h
++++ b/apps/root_menu.h
+@@ -63,7 +63,8 @@ enum {
+     GO_TO_PLAYLISTS_SCREEN,
+     GO_TO_PLAYLIST_VIEWER,
+     GO_TO_SYSTEM_SCREEN,
+-    GO_TO_SHORTCUTMENU
++    GO_TO_SHORTCUTMENU,
++    GO_TO_ADAMS_PLAYLISTS,
+ };
+ #ifndef PLUGIN
+ extern struct menu_item_ex root_menu_;
+diff --git a/firmware/drivers/button.c b/firmware/drivers/button.c
+index cd424d4..60f5866 100644
+--- a/firmware/drivers/button.c
++++ b/firmware/drivers/button.c
+@@ -299,6 +299,14 @@ static void button_tick(void)
+                            key */
+ 
+                         if (enable_sw_poweroff &&
++                            /* Multimedia key codes are a separate
++                               namespace from physical button bits: e.g.
++                               BUTTON_MULTIMEDIA_VOLUME_UP is
++                               (BUTTON_MULTIMEDIA|0x40) and collides with
++                               any POWEROFF_BUTTON holding low-byte bits
++                               (ipod6g: BUTTON_PLAY == 0x40), powering the
++                               device off on a held remote volume-up. */
++                            !(btn & BUTTON_MULTIMEDIA) &&
+                             (btn & POWEROFF_BUTTON
+ #ifdef RC_POWEROFF_BUTTON
+                                     || btn == RC_POWEROFF_BUTTON
+diff --git a/firmware/export/config/ipod6g.h b/firmware/export/config/ipod6g.h
+index c251925..746f73f 100644
+--- a/firmware/export/config/ipod6g.h
++++ b/firmware/export/config/ipod6g.h
+@@ -274,6 +274,8 @@
+ #endif
+ /* Inline earphone remote, decoded by the jack "Mikey" controller */
+ #define HAVE_MIKEY_REMOTE
++/* so the remote's volume buttons work in menus/lists too */
++#define HAVE_VOLUME_IN_LIST
+ #endif
+ 
+ /* Define this if you can switch on/off the accessory power supply */
+diff --git a/firmware/target/arm/s5l8702/debug-s5l8702.c b/firmware/target/arm/s5l8702/debug-s5l8702.c
+index fbf780b..d1426ea 100644
+--- a/firmware/target/arm/s5l8702/debug-s5l8702.c
++++ b/firmware/target/arm/s5l8702/debug-s5l8702.c
+@@ -138,12 +138,41 @@ bool dbg_hw_info(void)
+                             pmu_accessory_present() ? "true" : "false");
+ #endif
+ #ifdef HAVE_MIKEY_REMOTE
+-            /* r4/r5 are live register reads to help characterize the
+-             * remote-ID behavior across units (it varies; see
+-             * mikey-6g.c). r4 bit6 = ID bit, r5 = event register. */
+-            _DEBUG_PRINTF("mikey remote ctrl: %s r4=%02x r5=%02x",
+-                            mikey_present() ? "ok" : "--",
+-                            mikey_read(4), mikey_read(5));
++            /* Live r4/r5, plus what the polling thread captured while this
++             * screen was closed. reg5 events last only ~100ms, so the
++             * capture - not the live read - is what characterises a remote.
++             * Press each button a few times, then come here and read.
++             * r4 bit0 = centre, bit6 = ID latch; r5: 04/08 = vol+ down/up,
++             * 01/02 = vol- down/up, 30 = accessory ID. */
++            {
++                unsigned char r4o, r5o, h4[6], h5[6];
++                unsigned short cnt;
++                int n, k;
++                mikey_debug_summary(&r4o, &r5o, &cnt);
++                _DEBUG_PRINTF("mikey: %s live r4=%02x r5=%02x",
++                                mikey_present() ? "ok" : "--",
++                                mikey_read(4), mikey_read(5));
++                _DEBUG_PRINTF(" seen r4|=%02x r5|=%02x  n=%d",
++                                r4o, r5o, (int)cnt);
++                n = mikey_debug_history(h4, h5, 6);
++                for (k = 0; k < n; k += 2)
++                {
++                    if (k + 1 < n)
++                    {
++                        _DEBUG_PRINTF("  %d:%02x/%02x   %d:%02x/%02x",
++                                        k + 1, h4[k], h5[k],
++                                        k + 2, h4[k+1], h5[k+1]);
++                    }
++                    else
++                    {
++                        _DEBUG_PRINTF("  %d:%02x/%02x", k + 1, h4[k], h5[k]);
++                    }
++                }
++                if (n == 0)
++                {
++                    _DEBUG_PRINTF("  (no remote activity captured)");
++                }
++            }
+ #endif
+             line++;
+             _DEBUG_PRINTF("ADC:");
+diff --git a/firmware/target/arm/s5l8702/ipod6g/mikey-6g.c b/firmware/target/arm/s5l8702/ipod6g/mikey-6g.c
+index 8165e51..18a30e7 100644
+--- a/firmware/target/arm/s5l8702/ipod6g/mikey-6g.c
++++ b/firmware/target/arm/s5l8702/ipod6g/mikey-6g.c
+@@ -27,18 +27,15 @@
+  *                   the button detection engine. The chip resets on jack
+  *                   removal (all registers read zero afterwards), so the
+  *                   mode is re-armed on insertion.
+- *   reg4 & 0x40     identified-remote bit, set after the chip hears an
+- *                   Apple remote's ID chirp. UNIT-DEPENDENT: reliably
+- *                   latched on one 6G, never observed on two other
+- *                   120GB units, so nothing is gated on it; it is only
+- *                   shown in the hardware debug screen.
+- *   reg4 & 0x05     center (play/pause) held; a level signal. Can
+- *                   flicker while the mode is (re)armed, hence the
+- *                   "armed" guard below.
++ *   reg4 & 0x01     center (play/pause) held. Bit 2 (0x04) and the high
++ *                   base bit vary between remote units and are NOT the
++ *                   button (verified by on-device register capture), so
++ *                   only bit 0 is tested. Can flicker while the mode is
++ *                   (re)armed, hence the "armed" guard below.
+  *   reg5            volume edge events, each readable for ~100ms:
+  *                   0x04 vol+ press, 0x08 vol+ release,
+  *                   0x01 vol- press, 0x02 vol- release.
+- *                   0x30 is the accessory-ID event (no button meaning).
++ *                   0x30 is the accessory-ID event (ignored).
+  * The remote itself signals volume as static DC loads on the mic line and
+  * identifies via a one-time ultrasonic chirp (the same scheme David Carne
+  * documented for the shuffle 3G remote); Mikey does that level and chirp
+@@ -61,13 +58,69 @@
+ #define MIKEY_MODE_MIC      0x07    /* mic bias raised, for recording */
+ #define MIKEY_MODE_REMOTE   0x2f    /* mic bias + button detection */
+ 
+-#define MIKEY_ID_FLAG       0x40    /* identified-remote latch in reg4 */
+-#define MIKEY_BTN_CENTER    0x05
++#define MIKEY_BTN_CENTER    0x01    /* bit0 = center; bit2 is base level on this remote */
+ #define MIKEY_EVT_VOLUP_DN  0x04
+ #define MIKEY_EVT_VOLUP_UP  0x08
+ #define MIKEY_EVT_VOLDN_DN  0x01
+ #define MIKEY_EVT_VOLDN_UP  0x02
+ 
++
++/* ---- level-style remotes -------------------------------------------------
++ * Not every inline remote speaks Apple's scheme. Captured on this device
++ * from a third-party remote (2026-10-04, 32 samples):
++ *
++ *   idle            r4=0x20            (bit5 is a constant base level)
++ *   button down     r4=0x24            (bit2 = "a button is down")
++ *   which button    r5=0x04 vol+, r5=0x01 vol-, r5=0x00 centre
++ *
++ * r4 bit0 - Apple's centre bit - is never set, and r5 NEVER carries a
++ * release event (0x08 / 0x02). Two consequences:
++ *
++ *  - A centre mask of 0x05 matches bit2 and so fires on EVERY button, which
++ *    reads as the player pausing whenever you touch volume. A mask of 0x01
++ *    never matches at all, so centre does nothing. Both are wrong for this
++ *    remote; neither is a mask problem, it is a decoding-model problem.
++ *  - mikey_decode_vol() latches held=true on a press event and waits for a
++ *    release event that never arrives, so volume runs to the rail.
++ *
++ * So for these remotes decode the bit2 LEVEL instead, latching which button
++ * from r5 at the rising edge, and report a fixed-length click. A level
++ * cannot run away, and a click cannot stick.
++ *
++ * One physical press bounces: rise+event, fall, then a second eventless rise
++ * ~200ms later. An eventless rise is therefore only treated as a centre press
++ * when no other press has been accepted recently; that collapses the bounce
++ * without blocking real centre presses. */
++#define MIKEY_LVL_DOWN        0x04   /* r4: a button is down */
++#define MIKEY_LVL_PULSE_POLLS 3      /* reported click length, 60ms */
++#define MIKEY_LVL_OFF_POLLS   2      /* release debounce, 40ms */
++#define MIKEY_LVL_HOLD_CAP    100    /* 2s: last-resort stop for a stuck hold */
++#define MIKEY_LVL_REFRACTORY  30     /* 600ms: swallow the post-press bounce */
++
++/* Close the decision window: an r5 press event names the button, no event
++ * means the centre button. Centre is additionally gated on the refractory
++ * period, because one physical press bounces into a second, eventless rise
++ * a few hundred ms later and that must not read as a centre click. */
++static void lvl_decide(unsigned char evt, bool armed, int *pending,
++                       int *btn, int *pulse, int *refract)
++{
++    int want = 0;
++    *pending = 0;
++    if (evt & MIKEY_EVT_VOLUP_DN)
++        want = BUTTON_RC_VOL_UP;
++    else if (evt & MIKEY_EVT_VOLDN_DN)
++        want = BUTTON_RC_VOL_DOWN;
++    else if (*refract == 0)
++        want = BUTTON_MULTIMEDIA_PLAYPAUSE;
++
++    if (want && armed)
++    {
++        *btn = want;
++        *pulse = MIKEY_LVL_PULSE_POLLS;
++        *refract = MIKEY_LVL_REFRACTORY;
++    }
++}
++
+ /* A press+release pair landing in a single poll is stretched over this
+  * many polls, so the button driver's debounce (two identical consecutive
+  * reads at the 10ms button tick) still accepts the click. */
+@@ -104,15 +157,10 @@ void mikey_reset(void)
+ }
+ 
+ static int mikey_btn = BUTTON_NONE;
++static bool mikey_seen = false;
+ static volatile bool mic_active = false;
+-static bool mikey_detected = false;
+ static long mikey_stack[DEFAULT_STACK_SIZE/2/sizeof(long)];
+ 
+-bool mikey_present(void)
+-{
+-    return mikey_detected;
+-}
+-
+ /* The recording path owns the chip while the jack mic is enabled; the
+  * polling thread backs off and re-arms the remote mode afterwards. */
+ void mikey_set_mic_capture(bool enable)
+@@ -127,147 +175,102 @@ void mikey_set_mic_capture(bool enable)
+ /* Decode one volume button's press/release edge events into a held state.
+  * A real hold only produces the two edges, so between them *held carries
+  * the state; *click stretches a same-poll press+release (see above). */
+-static void mikey_decode_vol(unsigned char evt, unsigned char dn,
+-                             unsigned char up, bool *held, int *click)
++
++/* ---- diagnostic capture -------------------------------------------------
++ * The debug screen's own loop exits when a button is released, which makes
++ * it useless for watching a remote while you press it. So the capture lives
++ * here, in the polling thread: press buttons with the screen closed, then
++ * open it and read what was recorded.
++ *
++ * reg5 is an edge-event register readable for only ~100ms, so a live
++ * display would miss almost every press. We keep an OR-latch of every bit
++ * ever seen plus a short de-duplicated history of distinct (reg4, reg5)
++ * observations, which is enough to recover what a given remote actually
++ * signals for each button. */
++#define MIKEY_DBG_SLOTS 10
++static unsigned char dbg_r4[MIKEY_DBG_SLOTS];
++static unsigned char dbg_r5[MIKEY_DBG_SLOTS];
++static unsigned short dbg_count;        /* total distinct observations */
++static unsigned char dbg_r4_or, dbg_r5_or;
++static unsigned char dbg_last_r4, dbg_last_r5;
++
++static void mikey_dbg_record(unsigned char r4, unsigned char r5)
+ {
+-    if (*click > 0 && --*click == 0)
+-        *held = false;
++    dbg_r4_or |= r4;
++    dbg_r5_or |= r5;
++    if (!r4 && !r5)
++        return;                          /* idle: nothing to record */
++    if (r4 == dbg_last_r4 && r5 == dbg_last_r5)
++        return;                          /* unchanged: collapse repeats */
++    dbg_last_r4 = r4;
++    dbg_last_r5 = r5;
++    dbg_r4[dbg_count % MIKEY_DBG_SLOTS] = r4;
++    dbg_r5[dbg_count % MIKEY_DBG_SLOTS] = r5;
++    dbg_count++;
++}
+ 
+-    if (evt & dn)
++/* Oldest-first copy of the retained history. Returns how many slots filled. */
++int mikey_debug_history(unsigned char *r4out, unsigned char *r5out, int max)
++{
++    int have = (dbg_count < MIKEY_DBG_SLOTS) ? dbg_count : MIKEY_DBG_SLOTS;
++    int start = (dbg_count < MIKEY_DBG_SLOTS) ? 0 : (dbg_count % MIKEY_DBG_SLOTS);
++    int n = (have < max) ? have : max;
++    for (int i = 0; i < n; i++)
+     {
+-        *held = true;
+-        *click = (evt & up) ? MIKEY_CLICK_POLLS : 0;
++        int idx = (start + i) % MIKEY_DBG_SLOTS;
++        r4out[i] = dbg_r4[idx];
++        r5out[i] = dbg_r5[idx];
+     }
+-    else if ((evt & up) && *click == 0)
+-        *held = false;
++    return n;
+ }
+ 
+-/* Phantom-load failsafe: some passive cables present a DC load on the
+- * mic line that Mikey decodes as a volume button, producing a press
+- * edge the moment the detection engine arms and never a release (seen
+- * in the wild as volume ramping to zero on its own). A press edge this
+- * early cannot be a human, so it suppresses that button until a
+- * release edge proves a real remote is attached. This is the
+- * edge-event analog of the center button's "armed" guard, which
+- * already keeps mic-less TRS plugs (a permanent mic-line short) from
+- * reading as a stuck center button. */
+-#define MIKEY_ARM_WINDOW_POLLS  10      /* 200ms after (re)arming */
+-
+-/* Per-poll decode state, kept apart from the thread's power/mode
+- * bookkeeping so the register-to-button logic is a pure function of
+- * (state, reg4, reg5). */
+-struct mikey_decode {
+-    bool armed;          /* need a released reading before first press */
+-    bool vol_up, vol_dn;
+-    int up_click, dn_click;
+-    int arm_window;      /* polls left of phantom-press suppression window */
+-    bool up_suppressed, dn_suppressed;
+-    bool center_down;    /* debounced "press already reported" */
+-    int center_off;      /* consecutive released polls */
+-    int center_pulse;    /* click pulse countdown */
+-};
+-
+-static void mikey_decode_reset(struct mikey_decode *d)
++void mikey_debug_summary(unsigned char *r4_or, unsigned char *r5_or,
++                         unsigned short *count)
+ {
+-    d->armed = false;
+-    d->vol_up = d->vol_dn = false;
+-    d->up_click = d->dn_click = 0;
+-    d->arm_window = MIKEY_ARM_WINDOW_POLLS;
+-    d->up_suppressed = d->dn_suppressed = false;
+-    d->center_down = false;
+-    d->center_off = MIKEY_CENTER_OFF_POLLS;
+-    d->center_pulse = 0;
++    *r4_or = dbg_r4_or;
++    *r5_or = dbg_r5_or;
++    *count = dbg_count;
+ }
+ 
+-/* Apply the phantom-load failsafe to one volume button's edge bits:
+- * a press edge (without a same-poll release) inside the arm window
+- * marks the button suppressed; suppressed press edges are stripped
+- * until a release edge lifts the suppression. */
+-static unsigned char mikey_vol_gate(struct mikey_decode *d, unsigned char evt,
+-                                    unsigned char dn, unsigned char up,
+-                                    bool *suppressed)
++void mikey_debug_clear(void)
+ {
+-    if (evt & up)
+-        *suppressed = false;
+-    else if ((evt & dn) && d->arm_window > 0)
+-        *suppressed = true;
+-
+-    if (*suppressed)
+-        evt &= ~dn;
+-    return evt;
++    dbg_count = 0;
++    dbg_r4_or = dbg_r5_or = 0;
++    dbg_last_r4 = dbg_last_r5 = 0;
+ }
+ 
+-/* Decode one poll's register pair into a button mask. Volume is NOT
+- * gated on the reg4 identified-remote bit: that bit proved to be
+- * unit-dependent (reliably latched on one 6G, never seen on two other
+- * 120GB units where gating on it broke volume entirely), so it is
+- * only surfaced in the hardware debug screen for now. */
+-static int mikey_decode_poll(struct mikey_decode *d,
+-                             unsigned char btn, unsigned char evt)
++static void mikey_decode_vol(unsigned char evt, unsigned char dn,
++                             unsigned char up, bool *held, int *click)
+ {
+-    evt = mikey_vol_gate(d, evt, MIKEY_EVT_VOLUP_DN, MIKEY_EVT_VOLUP_UP,
+-                         &d->up_suppressed);
+-    evt = mikey_vol_gate(d, evt, MIKEY_EVT_VOLDN_DN, MIKEY_EVT_VOLDN_UP,
+-                         &d->dn_suppressed);
+-    if (d->arm_window > 0)
+-        d->arm_window--;
+-
+-    mikey_decode_vol(evt, MIKEY_EVT_VOLUP_DN, MIKEY_EVT_VOLUP_UP,
+-                     &d->vol_up, &d->up_click);
+-    mikey_decode_vol(evt, MIKEY_EVT_VOLDN_DN, MIKEY_EVT_VOLDN_UP,
+-                     &d->vol_dn, &d->dn_click);
+-
+-    /* reg4 can read pressed while the mode settles; don't report the
+-     * center button until it has been seen released once */
+-    bool raw = (btn & MIKEY_BTN_CENTER) != 0;
+-    if (!raw)
+-        d->armed = true;
+-
+-    /* click-only: emit a fixed pulse at each debounced rise */
+-    if (raw && d->armed)
+-    {
+-        if (!d->center_down && d->center_off >= MIKEY_CENTER_OFF_POLLS)
+-            d->center_pulse = MIKEY_CENTER_PULSE_POLLS;
+-        d->center_down = true;
+-        d->center_off = 0;
+-    }
+-    else
+-    {
+-        if (d->center_off < MIKEY_CENTER_OFF_POLLS)
+-            d->center_off++;
+-        if (d->center_off >= MIKEY_CENTER_OFF_POLLS)
+-            d->center_down = false;
+-    }
++    if (*click > 0 && --*click == 0)
++        *held = false;
+ 
+-    bool center = false;
+-    if (d->center_pulse > 0)
++    if (evt & dn)
+     {
+-        center = true;
+-        d->center_pulse--;
++        *held = true;
++        *click = (evt & up) ? MIKEY_CLICK_POLLS : 0;
+     }
+-
+-    /* All buttons report as multimedia keys: handled globally by
+-     * default_event_handler on every screen, so volume and play/pause
+-     * work in menus, WPS and plugins alike, matching the OF. */
+-    return (center    ? BUTTON_MULTIMEDIA_PLAYPAUSE   : 0)
+-         | (d->vol_up ? BUTTON_MULTIMEDIA_VOLUME_UP   : 0)
+-         | (d->vol_dn ? BUTTON_MULTIMEDIA_VOLUME_DOWN : 0);
++    else if ((evt & up) && *click == 0)
++        *held = false;
+ }
+ 
+-/* The chip only ACKs the bus while something occupies the jack, so
+- * presence can't be probed at boot; it is probed here whenever the
+- * jack is occupied. A few insertion transients may NAK before the
+- * first ACK; a model without the chip (2007) NAKs forever, so after
+- * the retry budget the poll backs way off to stay out of the way. */
+-#define MIKEY_PROBE_TRIES   25          /* ~2.5s of HZ/10 retries */
+-
+ static void mikey_thread(void)
+ {
+     bool powered = false;
+-    int naks = 0;
+-    struct mikey_decode decode;
+-
+-    mikey_decode_reset(&decode);
++    bool armed = false;   /* need a released reading before first press */
++    bool vol_up = false, vol_dn = false;
++    int up_click = 0, dn_click = 0;
++    bool center_down = false;   /* debounced "press already reported" */
++    int center_off = MIKEY_CENTER_OFF_POLLS;   /* consecutive released */
++    int center_pulse = 0;       /* click pulse countdown */
++
++    /* level-style remote state (see MIKEY_LVL_* above) */
++    bool lvl_down = false;      /* debounced bit2 level */
++    int  lvl_off = MIKEY_LVL_OFF_POLLS;
++    int  lvl_pulse = 0;
++    int  lvl_btn = 0;           /* which button the pulse reports */
++    int  lvl_pending = 0;       /* decision window countdown */
++    int  lvl_refract = 0;
+ 
+     while (1)
+     {
+@@ -276,48 +279,104 @@ static void mikey_thread(void)
+             if (powered && !mic_active)
+                 mikey_reset();
+             powered = false;
+-            naks = 0;
+-            mikey_decode_reset(&decode);
++            armed = false;
++            vol_up = vol_dn = false;
++            up_click = dn_click = 0;
++            center_down = false;
++            center_off = MIKEY_CENTER_OFF_POLLS;
++            center_pulse = 0;
++            lvl_down = false; lvl_off = MIKEY_LVL_OFF_POLLS;
++            lvl_pulse = lvl_btn = lvl_pending = lvl_refract = 0;
+             mikey_btn = BUTTON_NONE;
+             sleep(HZ/2);   /* nothing to poll, check back at leisure */
+             continue;
+         }
++        powered = true;
++        mikey_seen = true;
+ 
+         /* Re-arm when the mode readback disagrees (first pass, chip reset
+          * on jack removal, or the recording path rewrote it). Arming can
+          * flicker reg4 and emits a spurious accessory-ID event, so drop
+          * the state and settle for one poll. */
+-        unsigned char mode;
+-        if (i2c_read(0, MIKEY_ADDR, MIKEY_REG_MODE, 1, &mode) != 0)
+-        {
+-            /* no ACK: chip resetting around insertion, or not present */
+-            mikey_decode_reset(&decode);
+-            mikey_btn = BUTTON_NONE;
+-            if (naks < MIKEY_PROBE_TRIES)
+-            {
+-                naks++;
+-                sleep(HZ/10);
+-            }
+-            else
+-                sleep(HZ*2);
+-            continue;
+-        }
+-        naks = 0;
+-        powered = true;
+-        mikey_detected = true;   /* latched for the hw debug screen */
+-
+-        if (mode != MIKEY_MODE_REMOTE)
++        if (mikey_read(MIKEY_REG_MODE) != MIKEY_MODE_REMOTE)
+         {
+             mikey_write(MIKEY_REG_MODE, MIKEY_MODE_REMOTE);
+-            mikey_decode_reset(&decode);
++            armed = false;
++            vol_up = vol_dn = false;
++            up_click = dn_click = 0;
++            center_down = false;
++            center_off = MIKEY_CENTER_OFF_POLLS;
++            center_pulse = 0;
++            lvl_down = false; lvl_off = MIKEY_LVL_OFF_POLLS;
++            lvl_pulse = lvl_btn = lvl_pending = lvl_refract = 0;
+             mikey_btn = BUTTON_NONE;
+             sleep(HZ/50);
+             continue;
+         }
+ 
+         unsigned char evt = mikey_read(MIKEY_REG_EVT);
+-        unsigned char btn = mikey_read(MIKEY_REG_BTN);
+-        mikey_btn = mikey_decode_poll(&decode, btn, evt);
++        unsigned char r4  = mikey_read(MIKEY_REG_BTN);
++        mikey_dbg_record(r4, evt);
++
++
++        /* One decoder for both remote styles. Measured on this device:
++         *
++         *   idle              r4 = 0x20          (bit5 constant base level)
++         *   volume button     r4 = 0x24          (bit2 = a button is down)
++         *   centre button     r4 = 0x25          (bit2 + bit0)
++         *   which volume      r5 = 0x04 up, 0x01 down
++         *
++         * Both Apple and third-party remotes use r4 bit0 for centre, so
++         * there is nothing to auto-detect - an earlier version latched
++         * "this is an Apple remote" on bit0 and so disabled volume for the
++         * rest of the session the first time centre was pressed.
++         *
++         * They differ only in how a volume hold ENDS. Apple sends a release
++         * event in r5 (0x08 / 0x02); this remote sends none at all, which is
++         * why waiting for one let volume run to the rail. So end a hold on
++         * either signal: a release event, or r4 bit2 going clear. A level
++         * cannot get stuck, and the poll cap below is a last-resort stop. */
++        bool any_down = (r4 & MIKEY_LVL_DOWN) != 0;
++
++        if (evt & MIKEY_EVT_VOLUP_DN) { vol_up = true;  up_click = MIKEY_LVL_HOLD_CAP; }
++        if (evt & MIKEY_EVT_VOLDN_DN) { vol_dn = true;  dn_click = MIKEY_LVL_HOLD_CAP; }
++
++        if ((evt & MIKEY_EVT_VOLUP_UP) || !any_down || (up_click && !--up_click))
++            vol_up = false;
++        if ((evt & MIKEY_EVT_VOLDN_UP) || !any_down || (dn_click && !--dn_click))
++            vol_dn = false;
++
++        /* Centre: bit0, click-only. reg4 can read pressed while the mode
++         * settles, so it must be seen released once before any press counts. */
++        bool raw = (r4 & MIKEY_BTN_CENTER) != 0;
++        if (!raw)
++            armed = true;
++
++        if (raw && armed)
++        {
++            if (!center_down && center_off >= MIKEY_CENTER_OFF_POLLS)
++                center_pulse = MIKEY_CENTER_PULSE_POLLS;
++            center_down = true;
++            center_off = 0;
++        }
++        else
++        {
++            if (center_off < MIKEY_CENTER_OFF_POLLS)
++                center_off++;
++            if (center_off >= MIKEY_CENTER_OFF_POLLS)
++                center_down = false;
++        }
++
++        bool center = false;
++        if (center_pulse > 0)
++        {
++            center = true;
++            center_pulse--;
++        }
++
++        mikey_btn = (center ? BUTTON_MULTIMEDIA_PLAYPAUSE : 0)
++                  | (vol_up ? BUTTON_RC_VOL_UP   : 0)
++                  | (vol_dn ? BUTTON_RC_VOL_DOWN : 0);
+ 
+         /* volume edge events stay readable for ~100ms; 20ms leaves a
+          * comfortable margin against scheduling jitter */
+@@ -325,6 +384,14 @@ static void mikey_thread(void)
+     }
+ }
+ 
++/* Upstream's hardware debug screen (debug-s5l8702.c) calls this.
++ * This driver does not gate anything on the ID-chirp latch, so
++ * report presence as 'the chip ACKed the bus at least once'. */
++bool mikey_present(void)
++{
++    return mikey_seen;
++}
++
+ int mikey_button_read(void)
+ {
+     return mikey_btn;
+@@ -332,10 +399,6 @@ int mikey_button_read(void)
+ 
+ void mikey_init(void)
+ {
+-    /* Presence can't be probed here: the chip only ACKs while the
+-     * jack is occupied (booting without headphones must not disable
+-     * the remote). The thread probes on insertion instead and backs
+-     * off on models without the chip (2007). */
+     mikey_reset();
+     create_thread(mikey_thread, mikey_stack, sizeof(mikey_stack), 0,
+                   "mikey" IF_PRIO(, PRIORITY_SYSTEM) IF_COP(, CPU));
+diff --git a/firmware/target/arm/s5l8702/ipod6g/mikey-target.h b/firmware/target/arm/s5l8702/ipod6g/mikey-target.h
+index 888c14c..b18f72d 100644
+--- a/firmware/target/arm/s5l8702/ipod6g/mikey-target.h
++++ b/firmware/target/arm/s5l8702/ipod6g/mikey-target.h
+@@ -46,4 +46,13 @@ int  mikey_button_read(void);
+  * in the hardware debug screen. */
+ bool mikey_present(void);
+ 
++/* Diagnostic capture of what the attached remote actually signals.
++ * Recorded by the polling thread so presses can be made with the debug
++ * screen closed; reg5 events only persist ~100ms and a live read misses
++ * them. History is oldest-first and de-duplicated. */
++int  mikey_debug_history(unsigned char *r4out, unsigned char *r5out, int max);
++void mikey_debug_summary(unsigned char *r4_or, unsigned char *r5_or,
++                         unsigned short *count);
++void mikey_debug_clear(void);
++
+ #endif /* __MIKEY_TARGET_H__ */
+diff --git a/firmware/target/arm/s5l8702/ipod6g/powermgmt-6g.c b/firmware/target/arm/s5l8702/ipod6g/powermgmt-6g.c
+index 4af1d29..865fe52 100644
+--- a/firmware/target/arm/s5l8702/ipod6g/powermgmt-6g.c
++++ b/firmware/target/arm/s5l8702/ipod6g/powermgmt-6g.c
+@@ -29,10 +29,17 @@ unsigned short battery_level_disksafe = 3500;
+ 
+ unsigned short battery_level_shutoff = 3300;
+ 
+-/* voltages (millivolt) of 0%, 10%, ... 100% when charging disabled */
++/* voltages (millivolt) of 0%, 10%, ... 100% when charging disabled.
++ * MEASURED curve from a full battery_bench discharge of the 2000mAh cell
++ * is spread out (stock compressed 40-60% into ~30mV, which read jumpy).
++ * 0% is anchored at 3500mV, matching upstream: an earlier revision used
++ * 3320mV, leaving only 20mV above battery_level_shutoff (3300), so any
++ * load transient could cross the cutoff while the gauge still read >0%.
++ * battery_level_disksafe is also 3500, so 0% and the no-writes threshold
++ * now coincide. */
+ unsigned short percent_to_volt_discharge[11] =
+ {
+-    3500, 3670, 3720, 3750, 3770, 3800, 3860, 3920, 3980, 4070, 4170
++    3500, 3660, 3706, 3740, 3755, 3774, 3811, 3879, 3927, 3979, 4160
+ };
+ 
+ #if CONFIG_CHARGING
